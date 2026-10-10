@@ -7,15 +7,26 @@
  * is hard-split on word boundaries at ~400-word slices (sub-chunks follow
  * the same overlap pattern).
  *
+ * Image-derived content is fed in as pre-shaped "paragraphs" — the
+ * pipeline produces one paragraph per OCR result or vision description,
+ * each tagged with a `source_type` and optional `image_hash`. The
+ * chunker is otherwise unchanged.
+ *
  * Pure / no I/O — `/api/ask` can reuse this for future contextual-retrieval
  * upgrades.
  */
+
+export type SourceType = "text" | "ocr" | "image_description";
 
 export interface ChunkPageInput {
   /** 1-indexed page number from the source PDF. */
   page: number;
   /** Full text extracted from the page (post-trim, non-empty). */
   text: string;
+  /** Why this paragraph exists: native text, OCR, or vision description. */
+  source_type?: SourceType;
+  /** sha-256 prefix of the source image; only set for `image_description`. */
+  image_hash?: string;
 }
 
 export interface Chunk {
@@ -23,6 +34,8 @@ export interface Chunk {
   page: number;
   chunk_index: number;
   content: string;
+  source_type: SourceType;
+  image_hash: string | null;
 }
 
 const TARGET_WORDS = 400;
@@ -60,6 +73,8 @@ export function chunkPages(document: string, pages: ChunkPageInput[]): Chunk[] {
   let carryOverlap = "";
   let buffer = "";
   let bufferStartPage = -1;
+  let bufferSource: SourceType = "text";
+  let bufferImageHash: string | null = null;
 
   const flush = (): void => {
     const content = buffer.trim();
@@ -67,21 +82,34 @@ export function chunkPages(document: string, pages: ChunkPageInput[]): Chunk[] {
       buffer = "";
       bufferStartPage = -1;
       carryOverlap = "";
+      bufferSource = "text";
+      bufferImageHash = null;
       return;
     }
     const startPage = bufferStartPage;
+    const sourceType = bufferSource;
+    const imageHash = bufferImageHash;
     carryOverlap = tailOverlap(content);
     buffer = "";
     bufferStartPage = -1;
+    bufferSource = "text";
+    bufferImageHash = null;
     chunks.push({
       document,
       page: startPage,
       chunk_index: chunkIndex++,
       content,
+      source_type: sourceType,
+      image_hash: imageHash,
     });
   };
 
-  const ingest = (paragraph: string, page: number): void => {
+  const ingest = (
+    paragraph: string,
+    page: number,
+    sourceType: SourceType,
+    imageHash: string | null,
+  ): void => {
     const trimmed = paragraph.trim();
     if (trimmed === "") return;
     const words = trimmed.split(/\s+/);
@@ -99,6 +127,8 @@ export function chunkPages(document: string, pages: ChunkPageInput[]): Chunk[] {
         const fresh = wordCount(buffer) === 0;
         if (fresh) {
           bufferStartPage = page;
+          bufferSource = sourceType;
+          bufferImageHash = imageHash;
           buffer = carryOverlap + piece;
         } else {
           buffer = buffer + " " + piece;
@@ -112,16 +142,33 @@ export function chunkPages(document: string, pages: ChunkPageInput[]): Chunk[] {
     // prefix only when starting fresh) and flush if we crossed the threshold.
     if (wordCount(buffer) === 0) {
       bufferStartPage = page;
+      bufferSource = sourceType;
+      bufferImageHash = imageHash;
       buffer = carryOverlap + trimmed;
     } else {
-      buffer = buffer + "\n\n" + trimmed;
+      // Different source_type? Flush so the new chunk keeps its true
+      // tag — otherwise OCR noise would silently swallow a vision
+      // description, and a text chunk would hide an image_description.
+      if (bufferSource !== sourceType || bufferImageHash !== imageHash) {
+        flush();
+      }
+      if (wordCount(buffer) === 0) {
+        bufferStartPage = page;
+        bufferSource = sourceType;
+        bufferImageHash = imageHash;
+        buffer = carryOverlap + trimmed;
+      } else {
+        buffer = buffer + "\n\n" + trimmed;
+      }
     }
     if (wordCount(buffer) >= TARGET_WORDS) flush();
   };
 
-  for (const { page, text } of pages) {
+  for (const { page, text, source_type, image_hash } of pages) {
     const paragraphs = text.split(/\n\s*\n/);
-    for (const p of paragraphs) ingest(p, page);
+    const sourceType: SourceType = source_type ?? "text";
+    const imageHash: string | null = image_hash ?? null;
+    for (const p of paragraphs) ingest(p, page, sourceType, imageHash);
   }
 
   // Final trailing buffer (if any) becomes the last chunk of the document.

@@ -23,15 +23,7 @@ const REQUIRED = [
   "SUPABASE_SERVICE_ROLE_KEY",
 ] as const;
 
-const OPTIONAL = [
-  "EMBED_MODEL",
-  "EMBED_DIMS",
-  "MINIMAX_BASE_URL",
-  "MINIMAX_MODEL",
-] as const;
-
 export type RequiredKey = (typeof REQUIRED)[number];
-export type OptionalKey = (typeof OPTIONAL)[number];
 
 export interface Env {
   OPENROUTER_API_KEY: string;
@@ -42,6 +34,28 @@ export interface Env {
   EMBED_DIMS: number;
   MINIMAX_BASE_URL: string;
   MINIMAX_MODEL: string;
+  /** Provider used for image-understanding chat calls.
+   *  - "openrouter" — uses OPENROUTER_API_KEY + VISION_MODEL (must be a
+   *    vision-capable slug; account needs credits).
+   *  - "minimax"    — uses MINIMAX_API_KEY against MINIMAX_BASE_URL with
+   *    MINIMAX_MODEL. Multimodal; recommended when the user already has
+   *    MiniMax credits and no OpenRouter credits.
+   *  Default is "minimax" because the MiniMax account typically has the
+   *  same key the answer-generation path already uses.
+   */
+  VISION_PROVIDER: "openrouter" | "minimax";
+/** OpenRouter model id used when VISION_PROVIDER="openrouter". */
+  VISION_MODEL: string;
+  /** Tesseract.js language pack, e.g. "eng" or "eng+fra". */
+  OCR_LANG: string;
+  /** Skip images whose larger side exceeds this many pixels (cost guard). */
+  MAX_IMAGE_PIXELS: number;
+  /** Render scale used by `unpdf`/`pdfjs`. 1.0 ≈ 72 dpi; 2.0 ≈ 144 dpi. */
+  RENDER_DPI: number;
+  /** Hard kill-switch for OCR pass (e.g. for browsers without WASM budget). */
+  ENABLE_OCR: boolean;
+  /** Hard kill-switch for vision API calls. */
+  ENABLE_VISION: boolean;
 }
 
 let dotenvLoaded = false;
@@ -70,6 +84,22 @@ function loadDotenvLocal(): void {
   }
 }
 
+function bool(v: string | undefined, fallback: boolean): boolean {
+  if (v === undefined) return fallback;
+  const s = v.trim().toLowerCase();
+  if (s === "" || s === "0" || s === "false" || s === "no" || s === "off") {
+    return false;
+  }
+  if (s === "1" || s === "true" || s === "yes" || s === "on") return true;
+  return fallback;
+}
+
+function num(v: string | undefined, fallback: number): number {
+  if (v === undefined || v.trim() === "") return fallback;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+}
+
 let cached: Env | null = null;
 function buildEnv(): Env {
   loadDotenvLocal();
@@ -90,9 +120,22 @@ function buildEnv(): Env {
     SUPABASE_URL: process.env.SUPABASE_URL!,
     SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY!,
     EMBED_MODEL: process.env.EMBED_MODEL ?? "openai/text-embedding-3-small",
-    EMBED_DIMS: Number(process.env.EMBED_DIMS ?? 1536),
+    EMBED_DIMS: num(process.env.EMBED_DIMS, 1536),
     MINIMAX_BASE_URL: process.env.MINIMAX_BASE_URL ?? "https://api.minimax.io/v1",
     MINIMAX_MODEL: process.env.MINIMAX_MODEL ?? "MiniMax-M3",
+    // Vision provider + model. Default to MiniMax-M3 via the user's existing
+    // MiniMax key (it's multimodal), which avoids the OpenRouter-credits
+    // problem. Switch to "openrouter" if you prefer OpenRouter's routing.
+    VISION_PROVIDER: (process.env.VISION_PROVIDER ?? "minimax") as
+      | "openrouter"
+      | "minimax",
+    // Vision model slug. Only used when VISION_PROVIDER="openrouter".
+    VISION_MODEL: process.env.VISION_MODEL ?? "openai/gpt-4o-mini",
+    OCR_LANG: process.env.OCR_LANG ?? "eng",
+    MAX_IMAGE_PIXELS: num(process.env.MAX_IMAGE_PIXELS, 1280),
+    RENDER_DPI: num(process.env.RENDER_DPI, 2),
+    ENABLE_OCR: bool(process.env.ENABLE_OCR, true),
+    ENABLE_VISION: bool(process.env.ENABLE_VISION, true),
   });
 }
 

@@ -22,6 +22,8 @@ export interface Chunk {
   page: number;
   chunk_index: number;
   content: string;
+  source_type: "text" | "ocr" | "image_description";
+  image_hash: string | null;
 }
 
 export interface SessionData {
@@ -141,6 +143,8 @@ export async function createSession(data: {
     page: c.page,
     chunk_index: c.chunk_index,
     content: c.content,
+    source_type: c.source_type,
+    image_hash: c.image_hash,
     // pgvector accepts the literal-string form via PostgREST; `JSON.stringify`
     // yields exactly the `[0.1,0.2,…]` shape we need.
     embedding: JSON.stringify(data.embeddings[i]!),

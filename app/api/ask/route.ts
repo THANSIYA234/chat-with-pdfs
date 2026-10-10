@@ -36,10 +36,25 @@ const SYSTEM =
   `Use only the provided numbered sources for factual claims. ` +
   `Explain the answer naturally without describing your internal process. ` +
   `Use short paragraphs or bullet points when helpful. ` +
-  `Cite factual claims using the matching source numbers, such as [1] or [2]. ` +
+  `Do not include citation numbers such as [1] or [2] in the final answer text. ` +
+  `Use the provided sources to answer accurately. ` +
+  `Each source begins with its origin in square brackets: ` +
+  `[text] -- extractable PDF text, ` +
+  `[ocr] -- text recovered by OCR from a scanned page, or ` +
+  `[image_description] -- natural-language description emitted by a ` +
+  `vision model of a chart, diagram, photo, scanned element, or ` +
+  `embedded image. Image-description sources are the ONLY reliable ` +
+  `evidence for visible objects, labels, packaging contents, colors, ` +
+  `shapes, and scene descriptions; OCR is unreliable on photos and ` +
+  `returns noise characters. ` +
+  `When the user asks about a photo, the contents of a box, what a ` +
+  `diagram shows, the labels on a product, or any other visible ` +
+  `element, prefer image-description sources over text/OCR. ` +
   `If the answer cannot be found in the sources, reply with exactly: ` +
   `I couldn't find that in this PDF. ` +
-  `Do not guess or use outside knowledge.`;
+  `Do not guess or use outside knowledge, and do not invent ` +
+  `packaging contents, labels, or values that no source explicitly ` +
+  `states. If only OCR noise is available, that is not evidence.`;
 
 const REFUSAL = "I couldn't find that in this PDF.";
 const TOP_K = 5;
@@ -50,6 +65,8 @@ interface CitationOut {
   document: string;
   page: number;
   snippet?: string;
+  source_type?: "text" | "ocr" | "image_description";
+  image_hash?: string | null;
 }
 
 function buildUserPrompt(
@@ -74,13 +91,15 @@ function parseCitations(
     const n = Number(m[1]);
     if (!Number.isInteger(n) || n < 1 || n > chunks.length) continue;
     const ref = chunks[n - 1];
-    const key = `${ref.document}\u0000${ref.page}`;
+    const key = `${ref.document}\u0000${ref.page}\u0000${ref.source_type}`;
     if (seen.has(key)) continue;
     seen.add(key);
     out.push({
       document: ref.document,
       page: ref.page,
       snippet: ref.content.slice(0, SNIPPET_CHARS),
+      source_type: ref.source_type,
+      image_hash: ref.image_hash,
     });
   }
   return out;

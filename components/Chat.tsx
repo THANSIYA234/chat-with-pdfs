@@ -20,7 +20,13 @@
  */
 "use client";
 
-import { FormEvent, useEffect, useState, useSyncExternalStore } from "react";
+import {
+  FormEvent,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 type Role = "user" | "assistant";
 type SourceType = "text" | "ocr" | "image_description";
@@ -65,14 +71,14 @@ interface AskResponse {
 }
 
 const SOURCE_LABEL: Record<SourceType, string> = {
-  text: "t",
-  ocr: "o",
-  image_description: "i",
+  text: "Text",
+  ocr: "OCR",
+  image_description: "Image",
 };
 const SOURCE_TITLE: Record<SourceType, string> = {
-  text: "Page text",
-  ocr: "OCR text",
-  image_description: "Image description",
+  text: "Text citation — page text",
+  ocr: "OCR citation — scanned page text",
+  image_description: "Image citation — vision description",
 };
 
 const PDF_SESSION_STORAGE_KEY = "pdfSessionId";
@@ -135,6 +141,12 @@ export default function Chat() {
   const [uploadStage, setUploadStage] = useState<string>("");
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // After ~15s on the same stage, affirm that the run is still alive
+  // for the user (long pipelines can outlive the perceived patience).
+  const [stillWorking, setStillWorking] = useState(false);
+  // Live region for the upload status — focused on upload start so a
+  // screen reader hears the initial "Reading file…" announcement.
+  const statusRef = useRef<HTMLDivElement | null>(null);
 
   // The previously stored sessionId lives in localStorage, which is
   // browser-only. Reading it inside a lazy `useState` initializer would
@@ -176,9 +188,39 @@ export default function Chat() {
     };
   }, [blobUrl]);
 
+  // While uploading, flip `stillWorking` to true after 15s on the same
+  // stage label — long scans + OCR + vision calls easily exceed 60s.
+  // Resetting on stage change gives the user fresh patience per step.
+  useEffect(() => {
+    if (!uploading) {
+      setStillWorking(false);
+      return;
+    }
+    setStillWorking(false);
+    const t = window.setTimeout(() => setStillWorking(true), 15_000);
+    return () => window.clearTimeout(t);
+  }, [uploading, uploadStage]);
+
+  // Move focus to the live status region when an upload starts so a
+  // screen reader announces "Reading file…" right away instead of
+  // waiting for a text delta on the already-mounted region.
+  useEffect(() => {
+    if (uploading) {
+      statusRef.current?.focus({ preventScroll: true });
+    }
+  }, [uploading]);
+
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    // Client-side size guard — the server-side 50 MB cap is the source
+    // of truth, but rejecting before we open a blob URL / hit the
+    // network gives the user a friendlier, actionable message.
+    if (file.size > 50 * 1024 * 1024) {
+      setError("That file is over 50 MB. Please upload a smaller PDF.");
+      return;
+    }
 
     setUploading(true);
     setError(null);
@@ -254,7 +296,7 @@ export default function Chat() {
           ...prev,
           {
             role: "assistant",
-            text: "[error] " + (data.message ?? "ask failed"),
+            text: "Couldn't answer — " + (data.message ?? "ask failed"),
           },
         ]);
       }
@@ -262,7 +304,7 @@ export default function Chat() {
       const message = err instanceof Error ? err.message : "ask failed";
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", text: "[error] " + message },
+        { role: "assistant", text: "Couldn't answer — " + message },
       ]);
     } finally {
       setAsking(false);
@@ -314,9 +356,27 @@ export default function Chat() {
             />
           </label>
           {uploading ? (
-            <div className="text-sm text-zinc-600 dark:text-zinc-400">
-              <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-zinc-500 dark:bg-zinc-400" />{" "}
-              {uploadStage || "Working…"}
+            <div
+              id="pdf-upload-status"
+              ref={statusRef}
+              tabIndex={-1}
+              aria-live="polite"
+              aria-atomic="true"
+              className="flex flex-col gap-1.5 text-sm text-zinc-600 dark:text-zinc-400 focus:outline-none"
+            >
+              <div
+                className="h-1 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800"
+                aria-hidden="true"
+              >
+                <div className="h-full w-1/2 animate-[progress_1.2s_cubic-bezier(0.16,1,0.3,1)_infinite] rounded-full bg-zinc-500 motion-reduce:animate-none dark:bg-zinc-400" />
+              </div>
+              <style>
+                {`@keyframes progress { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }`}
+              </style>
+              <span>
+                {uploadStage || "Working…"}
+                {stillWorking ? " · still working on this one" : ""}
+              </span>
             </div>
           ) : null}
           {error ? (
@@ -331,17 +391,30 @@ export default function Chat() {
                 {documentName}
               </span>
               {" · "}
-              {numChunks} chunks from {numPages} pages
+              Ready to answer questions about {numPages} page{numPages === 1 ? "" : "s"}
               {pipeline && pipeline.describedImages > 0
                 ? ` · ${pipeline.describedImages} image${pipeline.describedImages === 1 ? "" : "s"} described`
                 : ""}
               {pipeline && pipeline.ocrPages > 0
-                ? ` · ${pipeline.ocrPages} page${pipeline.ocrPages === 1 ? "" : "s"} OCR'd`
+                ? ` · ${pipeline.ocrPages} page${pipeline.ocrPages === 1 ? "" : "s"} scanned`
                 : ""}
             </span>
             <button
               type="button"
-              onClick={resetSession}
+              onClick={() => {
+                // `window.confirm` only runs inside an event handler in
+                // the browser, so no SSR/typeof guard is needed. The
+                // chat transcript is ephemeral (forgotten when the
+                // server process dies), so a destructive reset must
+                // get an explicit opt-in.
+                if (
+                  window.confirm(
+                    "Upload a different PDF? This ends your current chat.",
+                  )
+                ) {
+                  resetSession();
+                }
+              }}
               className="rounded-md border border-zinc-300 bg-white px-3 py-1 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
             >
               Upload a different PDF
@@ -381,9 +454,10 @@ export default function Chat() {
                               target="_blank"
                               rel="noopener noreferrer"
                               title={SOURCE_TITLE[src]}
+                              aria-label={`Page ${c.page}, ${SOURCE_LABEL[src]} source`}
                               className="inline-flex items-center gap-1 rounded-full border border-zinc-300 bg-white px-2.5 py-0.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
                             >
-                              <span className="font-mono text-[10px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">
+                              <span className="text-[10px] tracking-wide text-zinc-500 dark:text-zinc-400">
                                 {SOURCE_LABEL[src]}
                               </span>
                               <span>p.{c.page}</span>
@@ -412,6 +486,8 @@ export default function Chat() {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="Ask a question..."
+              aria-label="Question"
+              maxLength={500}
               disabled={asking}
               className="flex-1 rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-zinc-500 focus:outline-none disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-500"
             />
